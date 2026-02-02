@@ -1,12 +1,10 @@
-# Core dependencies
-numpy>=1.24.0
+# Core
+numpy>=1.24
 pyyaml>=6.0
 
-# CAN communication (uncomment when ready)
-# python-can>=4.0
-
-# Optional: Robstride Python library
-# robstride
-
-# Development
-pytest>=7.0
+# Robstride motor control (Seeed Studio)
+# Install from PyPI or GitHub:
+#   pip install robstride
+#   OR
+#   git clone https://github.com/Seeed-Projects/RobStride_Control
+#   cd RobStride_Control/python && pip install -r requirements.txt

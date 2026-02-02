@@ -1,169 +1,142 @@
 """
 Robstride Motor Driver
 
-Low-level communication with Robstride actuators over CAN bus.
-Wrap this around your existing working CAN code.
+Communicates with Robstride actuators using Seeed Studio's RobStride library.
+
+Reference: https://wiki.seeedstudio.com/robstride_control/
 """
 
-import time
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 
+# Seeed Studio RobStride library
+# Install: pip install robstride  (or clone from GitHub)
+# GitHub: https://github.com/Seeed-Projects/RobStride_Control
+try:
+    from robstride import RobstrideBus
+    ROBSTRIDE_AVAILABLE = True
+except ImportError:
+    ROBSTRIDE_AVAILABLE = False
+    print("[Driver] Warning: robstride library not installed")
+    print("         Install with: pip install robstride")
+    print("         Or clone: https://github.com/Seeed-Projects/RobStride_Control")
+
+
 @dataclass
 class MotorState:
-    """Feedback from a single motor"""
+    """Feedback from a motor."""
     position: float = 0.0      # radians
     velocity: float = 0.0      # rad/s
-    current: float = 0.0       # Amps
-    temperature: float = 0.0   # Celsius
-    enabled: bool = False
-    error_code: int = 0
+    torque: float = 0.0        # N·m (estimated)
+    temperature: float = 25.0  # Celsius
 
 
 class RobstrideDriver:
     """
-    Driver for Robstride actuators.
+    Driver for Robstride actuators via Seeed Studio library.
 
-    This is a template - fill in with your working CAN code.
-    You can also use the existing robstride Python library:
-        pip install robstride
+    Uses MIT mode (impedance control) for all commands.
     """
 
-    def __init__(self, interface: str = "can0", bitrate: int = 1_000_000):
+    def __init__(self, interface: str = "can0"):
         self.interface = interface
-        self.bitrate = bitrate
-        self._bus = None
-        self._initialized = False
+        self._bus: Optional[RobstrideBus] = None
 
     def initialize(self) -> bool:
-        """
-        Initialize CAN interface.
+        """Initialize CAN bus connection."""
+        if not ROBSTRIDE_AVAILABLE:
+            print("[Driver] Cannot initialize - robstride library not installed")
+            return False
 
-        Returns True if successful.
-        """
         try:
-            # Option 1: Use python-can directly
-            # import can
-            # self._bus = can.interface.Bus(
-            #     channel=self.interface,
-            #     bustype='socketcan',
-            #     bitrate=self.bitrate
-            # )
-
-            # Option 2: Use robstride library
-            # from robstride import RobstrideBus
-            # self._bus = RobstrideBus(interface=self.interface)
-
-            # For now, just mark as initialized (replace with real code)
-            self._initialized = True
-            print(f"[Driver] Initialized CAN interface: {self.interface}")
+            self._bus = RobstrideBus(self.interface)
+            print(f"[Driver] Connected to {self.interface}")
             return True
-
         except Exception as e:
             print(f"[Driver] Failed to initialize: {e}")
             return False
 
-    def scan(self, id_range: tuple = (1, 50)) -> List[int]:
-        """
-        Scan for connected motors.
-
-        Returns list of found motor IDs.
-        """
-        if not self._initialized:
+    def scan(self) -> List[int]:
+        """Scan for connected motors. Returns list of motor IDs."""
+        if self._bus is None:
             return []
 
-        found = []
-        print(f"[Driver] Scanning for motors on {self.interface}...")
-
-        # Replace with actual scan code
-        # for motor_id in range(id_range[0], id_range[1] + 1):
-        #     try:
-        #         self._bus.get_feedback(motor_id, timeout=0.01)
-        #         found.append(motor_id)
-        #     except:
-        #         pass
-
-        # Placeholder: return expected IDs
-        found = [11, 12, 13, 14, 15]
-
-        print(f"[Driver] Found motors: {found}")
-        return found
+        try:
+            found = self._bus.scan_channel()
+            print(f"[Driver] Found motors: {found}")
+            return found
+        except Exception as e:
+            print(f"[Driver] Scan failed: {e}")
+            return []
 
     def enable(self, motor_id: int) -> bool:
-        """Enable a motor for torque control."""
-        if not self._initialized:
+        """Enable motor for torque control."""
+        if self._bus is None:
             return False
 
         try:
-            # self._bus.enable(motor_id)
-            print(f"[Driver] Enabled motor {motor_id}")
+            self._bus.enable_motors([motor_id])
             return True
         except Exception as e:
-            print(f"[Driver] Failed to enable motor {motor_id}: {e}")
+            print(f"[Driver] Enable failed for motor {motor_id}: {e}")
             return False
 
     def disable(self, motor_id: int) -> bool:
-        """Disable a motor (coast mode)."""
-        if not self._initialized:
+        """Disable motor (coast mode)."""
+        if self._bus is None:
             return False
 
         try:
-            # self._bus.disable(motor_id)
-            print(f"[Driver] Disabled motor {motor_id}")
+            # Send zero torque command with zero gains to coast
+            self._bus.write_operation_frame(
+                motor_id=motor_id,
+                p_des=0.0,
+                v_des=0.0,
+                kp=0.0,
+                kd=0.0,
+                t_ff=0.0
+            )
             return True
         except Exception as e:
-            print(f"[Driver] Failed to disable motor {motor_id}: {e}")
+            print(f"[Driver] Disable failed for motor {motor_id}: {e}")
             return False
-
-    def disable_all(self, motor_ids: List[int]) -> None:
-        """Disable all motors."""
-        for motor_id in motor_ids:
-            self.disable(motor_id)
 
     def set_zero(self, motor_id: int) -> bool:
         """Set current position as zero."""
-        if not self._initialized:
+        if self._bus is None:
             return False
 
         try:
-            # self._bus.set_zero(motor_id)
-            print(f"[Driver] Set zero for motor {motor_id}")
+            # This depends on the specific Seeed library version
+            # Some versions have set_zero(), others may need different approach
+            if hasattr(self._bus, 'set_zero'):
+                self._bus.set_zero(motor_id)
+            elif hasattr(self._bus, 'set_motor_zero'):
+                self._bus.set_motor_zero(motor_id)
+            else:
+                print(f"[Driver] set_zero not available in this library version")
+                return False
             return True
         except Exception as e:
-            print(f"[Driver] Failed to set zero for motor {motor_id}: {e}")
+            print(f"[Driver] Set zero failed for motor {motor_id}: {e}")
             return False
 
     def read(self, motor_id: int) -> MotorState:
         """Read current motor state."""
-        if not self._initialized:
+        if self._bus is None:
             return MotorState()
 
         try:
-            # feedback = self._bus.get_feedback(motor_id)
-            # return MotorState(
-            #     position=feedback.position,
-            #     velocity=feedback.velocity,
-            #     current=feedback.current,
-            #     temperature=feedback.temperature,
-            #     enabled=True,
-            #     error_code=0
-            # )
-
-            # Placeholder
+            response = self._bus.read_frame(motor_id)
             return MotorState(
-                position=0.0,
-                velocity=0.0,
-                current=0.0,
-                temperature=25.0,
-                enabled=True,
-                error_code=0
+                position=response.get('position', 0.0),
+                velocity=response.get('velocity', 0.0),
+                torque=response.get('torque', 0.0),
+                temperature=response.get('temperature', 25.0)
             )
         except Exception as e:
-            return MotorState(error_code=-1)
-
-    def read_all(self, motor_ids: List[int]) -> Dict[int, MotorState]:
-        """Read state from multiple motors."""
-        return {mid: self.read(mid) for mid in motor_ids}
+            # Return default state on read failure
+            return MotorState()
 
     def command(
         self,
@@ -178,64 +151,68 @@ class RobstrideDriver:
         Send MIT mode command (impedance control).
 
         Args:
-            motor_id: Target motor CAN ID
-            position: Target position in radians
-            velocity: Target velocity in rad/s
-            kp: Position gain (N·m/rad)
-            kd: Damping gain (N·m·s/rad)
-            torque: Feedforward torque in N·m
-
-        Returns:
-            True if command sent successfully
+            motor_id: Motor CAN ID
+            position: Target position (radians)
+            velocity: Target velocity (rad/s)
+            kp: Position gain
+            kd: Velocity/damping gain
+            torque: Feedforward torque (N·m)
         """
-        if not self._initialized:
+        if self._bus is None:
             return False
 
         try:
-            # self._bus.write_mit_frame(
-            #     motor_id,
-            #     position=position,
-            #     velocity=velocity,
-            #     kp=kp,
-            #     kd=kd,
-            #     torque=torque
-            # )
+            self._bus.write_operation_frame(
+                motor_id=motor_id,
+                p_des=position,
+                v_des=velocity,
+                kp=kp,
+                kd=kd,
+                t_ff=torque
+            )
             return True
         except Exception as e:
             print(f"[Driver] Command failed for motor {motor_id}: {e}")
             return False
 
-    def command_position(self, motor_id: int, position: float) -> bool:
-        """Simple position command with default gains."""
-        return self.command(motor_id, position=position, kp=20.0, kd=2.0)
-
     def shutdown(self) -> None:
-        """Clean shutdown of driver."""
-        if self._bus:
-            # self._bus.shutdown()
-            pass
-        self._initialized = False
+        """Clean shutdown."""
+        self._bus = None
         print("[Driver] Shutdown complete")
 
 
-# Convenience function for quick testing
-def test_driver():
-    """Quick driver test."""
-    driver = RobstrideDriver()
+# For testing without hardware
+class MockDriver:
+    """Mock driver for testing without hardware."""
 
-    if not driver.initialize():
-        print("Failed to initialize driver")
-        return
+    def __init__(self, interface: str = "can0"):
+        self.interface = interface
+        self._positions: Dict[int, float] = {}
 
-    motors = driver.scan()
-    print(f"Found {len(motors)} motors")
+    def initialize(self) -> bool:
+        print(f"[MockDriver] Initialized (no hardware)")
+        return True
 
-    for mid in motors:
-        state = driver.read(mid)
-        print(f"Motor {mid}: pos={state.position:.3f} rad, temp={state.temperature:.1f}°C")
+    def scan(self) -> List[int]:
+        return [11, 12, 13, 14, 15]
 
-    driver.shutdown()
+    def enable(self, motor_id: int) -> bool:
+        self._positions.setdefault(motor_id, 0.0)
+        return True
 
+    def disable(self, motor_id: int) -> bool:
+        return True
 
-if __name__ == "__main__":
-    test_driver()
+    def set_zero(self, motor_id: int) -> bool:
+        self._positions[motor_id] = 0.0
+        return True
+
+    def read(self, motor_id: int) -> MotorState:
+        return MotorState(position=self._positions.get(motor_id, 0.0))
+
+    def command(self, motor_id: int, position: float, **kwargs) -> bool:
+        self._positions[motor_id] = position
+        return True
+
+    def shutdown(self) -> None:
+        print("[MockDriver] Shutdown")

@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Motor Test Script
+Motor Test
 
-Tests each motor individually to verify:
-1. Enable/disable works
-2. Position control works
-3. Motor is responsive
+Tests each motor with small movements.
 
 Usage:
-    python scripts/test_motors.py                # Test all motors
-    python scripts/test_motors.py --joint elbow  # Test specific joint
-    python scripts/test_motors.py --amplitude 10 # Use smaller motion
+    python scripts/test_motors.py                 # Test all
+    python scripts/test_motors.py --joint elbow   # Test one
+    python scripts/test_motors.py --amplitude 10  # Smaller motion
 """
 
 import argparse
@@ -21,85 +18,47 @@ import yaml
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from driver import RobstrideDriver
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    with open(path, 'r') as f:
+    with open(path) as f:
         return yaml.safe_load(f)
 
 
 def test_motor(driver: RobstrideDriver, name: str, motor_id: int,
-               config: dict, amplitude: float = 20.0) -> bool:
-    """
-    Test a single motor.
+               config: dict, amplitude: float) -> bool:
+    """Test one motor. Returns True if passed."""
 
-    Returns True if all tests pass.
-    """
-    print(f"\n{'='*50}")
+    print(f"\n{'='*40}")
     print(f"Testing: {name} (ID {motor_id})")
-    print('='*50)
+    print('='*40)
 
-    joint_cfg = config['joints'][name]
-    min_pos = joint_cfg['min']
-    max_pos = joint_cfg['max']
-
-    # Clamp amplitude to joint limits
-    test_amplitude = min(amplitude, (max_pos - min_pos) / 4)
-
-    results = {}
-
-    # Test 1: Enable
-    print("\n[Test 1] Enable motor...")
-    if driver.enable(motor_id):
-        print("  PASS: Motor enabled")
-        results['enable'] = True
-    else:
-        print("  FAIL: Could not enable motor")
-        results['enable'] = False
-        return False
-
-    time.sleep(0.5)
-
-    # Test 2: Read state
-    print("\n[Test 2] Read motor state...")
-    state = driver.read(motor_id)
-    print(f"  Position: {np.degrees(state.position):+.2f}°")
-    print(f"  Velocity: {np.degrees(state.velocity):+.2f}°/s")
-    print(f"  Temperature: {state.temperature:.1f}°C")
-    results['read'] = True
-
-    # Test 3: Small position command
-    print(f"\n[Test 3] Position control (±{test_amplitude:.0f}°)...")
-
-    initial_pos = np.degrees(state.position)
+    joint = config['joints'][name]
     kp = config['control']['default_kp']
     kd = config['control']['default_kd']
 
-    # Move positive
-    target = initial_pos + test_amplitude
-    print(f"  Moving to {target:+.1f}°...")
+    # Clamp amplitude to safe range
+    safe_amp = min(amplitude, (joint['max'] - joint['min']) / 4)
 
-    for _ in range(100):  # 1 second at 100Hz
-        driver.command(motor_id, np.radians(target), kp=kp, kd=kd)
-        time.sleep(0.01)
+    # Test 1: Enable
+    print("\n[1] Enable...")
+    if not driver.enable(motor_id):
+        print("  FAIL")
+        return False
+    print("  OK")
+    time.sleep(0.3)
 
+    # Test 2: Read
+    print("\n[2] Read state...")
     state = driver.read(motor_id)
-    actual = np.degrees(state.position)
-    error = abs(target - actual)
-    print(f"  Target: {target:+.1f}°, Actual: {actual:+.1f}°, Error: {error:.2f}°")
+    initial = np.degrees(state.position)
+    print(f"  Position: {initial:+.2f}°")
+    print(f"  Temperature: {state.temperature:.1f}°C")
 
-    if error < 5.0:
-        print("  PASS: Position tracking OK")
-        results['position_pos'] = True
-    else:
-        print("  FAIL: Large tracking error")
-        results['position_pos'] = False
-
-    # Move negative
-    target = initial_pos - test_amplitude
-    print(f"  Moving to {target:+.1f}°...")
+    # Test 3: Move positive
+    target = initial + safe_amp
+    print(f"\n[3] Move to {target:+.1f}°...")
 
     for _ in range(100):
         driver.command(motor_id, np.radians(target), kp=kp, kd=kd)
@@ -108,59 +67,51 @@ def test_motor(driver: RobstrideDriver, name: str, motor_id: int,
     state = driver.read(motor_id)
     actual = np.degrees(state.position)
     error = abs(target - actual)
-    print(f"  Target: {target:+.1f}°, Actual: {actual:+.1f}°, Error: {error:.2f}°")
+    print(f"  Actual: {actual:+.1f}°, Error: {error:.2f}°")
 
-    if error < 5.0:
-        print("  PASS: Position tracking OK")
-        results['position_neg'] = True
-    else:
-        print("  FAIL: Large tracking error")
-        results['position_neg'] = False
+    pos_ok = error < 5.0
+    print(f"  {'OK' if pos_ok else 'FAIL'}")
 
-    # Return to initial
-    print(f"  Returning to {initial_pos:+.1f}°...")
+    # Test 4: Move negative
+    target = initial - safe_amp
+    print(f"\n[4] Move to {target:+.1f}°...")
+
     for _ in range(100):
-        driver.command(motor_id, np.radians(initial_pos), kp=kp, kd=kd)
+        driver.command(motor_id, np.radians(target), kp=kp, kd=kd)
         time.sleep(0.01)
 
-    # Test 4: Disable
-    print("\n[Test 4] Disable motor...")
-    if driver.disable(motor_id):
-        print("  PASS: Motor disabled")
-        results['disable'] = True
-    else:
-        print("  FAIL: Could not disable motor")
-        results['disable'] = False
+    state = driver.read(motor_id)
+    actual = np.degrees(state.position)
+    error = abs(target - actual)
+    print(f"  Actual: {actual:+.1f}°, Error: {error:.2f}°")
 
-    # Summary
-    print(f"\n--- Results for {name} ---")
-    passed = sum(results.values())
-    total = len(results)
-    print(f"  Passed: {passed}/{total}")
+    neg_ok = error < 5.0
+    print(f"  {'OK' if neg_ok else 'FAIL'}")
 
-    return passed == total
+    # Return to start
+    print(f"\n[5] Return to {initial:+.1f}°...")
+    for _ in range(100):
+        driver.command(motor_id, np.radians(initial), kp=kp, kd=kd)
+        time.sleep(0.01)
+
+    # Disable
+    print("\n[6] Disable...")
+    driver.disable(motor_id)
+    print("  OK")
+
+    passed = pos_ok and neg_ok
+    print(f"\nResult: {'PASS' if passed else 'FAIL'}")
+    return passed
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Motor test utility')
-    parser.add_argument('--config', default='config.yaml', help='Config file')
-    parser.add_argument('--joint', help='Test specific joint only')
-    parser.add_argument('--amplitude', type=float, default=20.0,
-                        help='Test motion amplitude in degrees')
-
+    parser = argparse.ArgumentParser(description='Motor test')
+    parser.add_argument('--config', default='config.yaml')
+    parser.add_argument('--joint', help='Test specific joint')
+    parser.add_argument('--amplitude', type=float, default=20.0, help='Motion amplitude (deg)')
     args = parser.parse_args()
 
     config = load_config(args.config)
-
-    driver = RobstrideDriver(
-        interface=config['can']['interface'],
-        bitrate=config['can']['bitrate']
-    )
-
-    if not driver.initialize():
-        print("Failed to initialize driver!")
-        return
-
     joints = config['joints']
 
     if args.joint:
@@ -170,12 +121,17 @@ def main():
             return
         joints = {args.joint: joints[args.joint]}
 
-    print("\n" + "=" * 50)
-    print("MOTOR TEST SEQUENCE")
-    print("=" * 50)
-    print(f"Testing {len(joints)} motor(s)")
-    print(f"Amplitude: ±{args.amplitude}°")
-    print("\nWARNING: Motors will move! Ensure arm is safe.")
+    driver = RobstrideDriver(config['can']['interface'])
+
+    if not driver.initialize():
+        print("Driver initialization failed!")
+        return
+
+    print("\n" + "=" * 40)
+    print("MOTOR TEST")
+    print("=" * 40)
+    print(f"Testing {len(joints)} motor(s), amplitude ±{args.amplitude}°")
+    print("\nWARNING: Motors will move!")
 
     input("\nPress Enter to start...")
 
@@ -187,25 +143,21 @@ def main():
                 driver, name, cfg['motor_id'],
                 config, args.amplitude
             )
-
     finally:
-        # Ensure all motors are disabled
         print("\nDisabling all motors...")
-        for name, cfg in config['joints'].items():
+        for cfg in config['joints'].values():
             driver.disable(cfg['motor_id'])
         driver.shutdown()
 
-    # Final summary
-    print("\n" + "=" * 50)
-    print("TEST SUMMARY")
-    print("=" * 50)
+    # Summary
+    print("\n" + "=" * 40)
+    print("SUMMARY")
+    print("=" * 40)
     for name, passed in results.items():
-        status = "PASS" if passed else "FAIL"
-        print(f"  {name}: {status}")
+        print(f"  {name}: {'PASS' if passed else 'FAIL'}")
 
-    total_pass = sum(results.values())
-    total = len(results)
-    print(f"\nOverall: {total_pass}/{total} motors passed")
+    total = sum(results.values())
+    print(f"\n{total}/{len(results)} passed")
 
 
 if __name__ == "__main__":
