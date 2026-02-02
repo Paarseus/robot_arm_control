@@ -1,0 +1,12 @@
+# Core dependencies
+numpy>=1.24.0
+pyyaml>=6.0
+
+# CAN communication (uncomment when ready)
+# python-can>=4.0
+
+# Optional: Robstride Python library
+# robstride
+
+# Development
+pytest>=7.0

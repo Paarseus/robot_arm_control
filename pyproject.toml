@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "robot-arm-control"
+version = "0.1.0"
+description = "K-Bot humanoid robot arm control software"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+can = [
+    "python-can>=4.0",
+]
+dev = [
+    "pytest>=7.0",
+    "black",
+    "ruff",
+]
+sim = [
+    "mujoco>=3.0",
+]
+
+[project.scripts]
+arm-control = "main:main"
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I"]

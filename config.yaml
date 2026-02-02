@@ -1,0 +1,61 @@
+# K-Bot Arm Configuration
+# Adjust motor_ids and limits to match your hardware
+
+robot:
+  name: "kbot_arm"
+  description: "K-Scale K-Bot single arm"
+
+can:
+  interface: "can0"
+  bitrate: 1000000
+
+control:
+  rate_hz: 100
+  default_kp: 20.0
+  default_kd: 2.0
+
+# Joint configuration
+# - motor_id: CAN ID of the Robstride actuator
+# - min/max: Joint limits in degrees
+# - max_velocity: Maximum velocity in deg/s
+# - max_torque: Maximum torque in N·m
+joints:
+  shoulder_pitch:
+    motor_id: 11
+    min: -90
+    max: 180
+    max_velocity: 180
+    max_torque: 40
+
+  shoulder_roll:
+    motor_id: 12
+    min: -90
+    max: 90
+    max_velocity: 180
+    max_torque: 40
+
+  elbow:
+    motor_id: 13
+    min: 0
+    max: 135
+    max_velocity: 180
+    max_torque: 20
+
+  wrist_pitch:
+    motor_id: 14
+    min: -90
+    max: 90
+    max_velocity: 270
+    max_torque: 6
+
+  wrist_roll:
+    motor_id: 15
+    min: -180
+    max: 180
+    max_velocity: 360
+    max_torque: 6
+
+safety:
+  watchdog_timeout_ms: 50
+  max_temperature: 70
+  enable_limits: true
