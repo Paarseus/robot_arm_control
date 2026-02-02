@@ -2,427 +2,218 @@
 """
 Motor Calibration
 
-IMPORTANT: This script does NOT move motors automatically.
-Motors only move if you explicitly use --zero with endstop movement.
+Interactive calibration where YOU move the motors by hand.
+The script reads positions and saves to config.
 
 Usage:
-    python scripts/calibrate.py --scan              # Find motors (no movement)
-    python scripts/calibrate.py --read              # Read positions (no movement)
-    python scripts/calibrate.py --verify            # Check config vs hardware
-    python scripts/calibrate.py --set-zero          # Set current position as zero
-    python scripts/calibrate.py --set-zero elbow    # Set zero for one joint
-    python scripts/calibrate.py --save-offsets      # Save current positions as offsets
-    python scripts/calibrate.py --test-direction    # Interactive direction test
+    python scripts/calibrate.py                 # Full calibration wizard
+    python scripts/calibrate.py --scan          # Just scan for motors
+    python scripts/calibrate.py --read          # Just read positions
+    python scripts/calibrate.py --joint elbow   # Calibrate one joint
 """
 
 import argparse
 import sys
 import os
 import yaml
-import json
 import numpy as np
 from datetime import datetime
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from driver import RobstrideDriver
 
 
-# Calibration data file (separate from config)
-CALIBRATION_FILE = "calibration.yaml"
-
-
-def load_config(path: str = "config.yaml") -> dict:
+def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
 
 
-def save_config(config: dict, path: str = "config.yaml"):
-    """Save config back to file."""
+def save_config(config: dict, path: str):
     with open(path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
 
-def load_calibration(path: str = CALIBRATION_FILE) -> dict:
-    """Load calibration data."""
-    if os.path.exists(path):
-        with open(path) as f:
-            return yaml.safe_load(f) or {}
-    return {}
-
-
-def save_calibration(data: dict, path: str = CALIBRATION_FILE):
-    """Save calibration data."""
-    with open(path, 'w') as f:
-        yaml.dump(data, f, default_flow_style=False)
-    print(f"[Calibration] Saved to {path}")
-
-
-def scan(driver: RobstrideDriver):
-    """
-    Scan for motors. Does NOT move anything.
-    """
-    print("\n" + "=" * 40)
-    print("SCANNING FOR MOTORS")
-    print("=" * 40)
-    print("(This does not move any motors)\n")
-
+def scan(driver: RobstrideDriver) -> list:
+    """Scan for motors."""
+    print("\nScanning...")
     found = driver.scan()
-
-    if not found:
-        print("No motors found!")
-        print("\nTroubleshooting:")
-        print("  1. CAN interface up? Run: ip link show can0")
-        print("  2. Power connected to motors?")
-        print("  3. CAN wiring correct? Check termination resistors.")
-        return []
-
-    print(f"Found {len(found)} motor(s): {found}")
+    if found:
+        print(f"Found {len(found)} motor(s): {found}")
+    else:
+        print("No motors found. Check CAN connection.")
     return found
 
 
-def read_positions(driver: RobstrideDriver, config: dict):
+def read_position(driver: RobstrideDriver, motor_id: int) -> float:
+    """Read motor position in degrees."""
+    state = driver.read(motor_id)
+    return np.degrees(state.position)
+
+
+def read_all(driver: RobstrideDriver, config: dict):
+    """Read all motor positions."""
+    print("\nCurrent positions:")
+    print("-" * 40)
+    for name, cfg in config['joints'].items():
+        pos = read_position(driver, cfg['motor_id'])
+        print(f"  {name:20} (ID {cfg['motor_id']:2}): {pos:+8.2f}°")
+
+
+def calibrate_joint(driver: RobstrideDriver, name: str, motor_id: int) -> dict:
     """
-    Read current positions. Does NOT move anything.
+    Calibrate one joint interactively.
+
+    Returns dict with: min, max, sign, zero_offset
     """
-    print("\n" + "=" * 40)
-    print("READING MOTOR POSITIONS")
-    print("=" * 40)
-    print("(This does not move any motors)\n")
+    print(f"\n{'='*50}")
+    print(f"Calibrating: {name} (Motor ID {motor_id})")
+    print('='*50)
+
+    # Step 1: Find negative limit
+    print("\n[Step 1] Move joint to NEGATIVE limit (min position)")
+    print("         Then press Enter...")
+    input()
+    neg_limit = read_position(driver, motor_id)
+    print(f"         Recorded: {neg_limit:+.2f}°")
+
+    # Step 2: Find positive limit
+    print("\n[Step 2] Move joint to POSITIVE limit (max position)")
+    print("         Then press Enter...")
+    input()
+    pos_limit = read_position(driver, motor_id)
+    print(f"         Recorded: {pos_limit:+.2f}°")
+
+    # Determine sign: if pos_limit > neg_limit, sign = 1, else sign = -1
+    if pos_limit > neg_limit:
+        sign = 1
+        min_deg = neg_limit
+        max_deg = pos_limit
+    else:
+        sign = -1
+        min_deg = pos_limit
+        max_deg = neg_limit
+
+    # Step 3: Set zero position
+    print("\n[Step 3] Move joint to ZERO position (home/reference)")
+    print("         Then press Enter...")
+    input()
+    zero_pos = read_position(driver, motor_id)
+    print(f"         Recorded: {zero_pos:+.2f}°")
+
+    # Calculate offset so that this position reads as 0
+    zero_offset = sign * zero_pos
+
+    # Adjust min/max relative to zero
+    min_adjusted = sign * min_deg - zero_offset
+    max_adjusted = sign * max_deg - zero_offset
+
+    # Ensure min < max
+    final_min = min(min_adjusted, max_adjusted)
+    final_max = max(min_adjusted, max_adjusted)
+
+    # Round to clean values
+    final_min = round(final_min, 1)
+    final_max = round(final_max, 1)
+    zero_offset = round(zero_offset, 2)
+
+    print(f"\n         Result:")
+    print(f"           sign: {sign:+d}")
+    print(f"           min:  {final_min:+.1f}°")
+    print(f"           max:  {final_max:+.1f}°")
+    print(f"           zero_offset: {zero_offset:+.2f}°")
+
+    return {
+        'min': final_min,
+        'max': final_max,
+        'sign': sign,
+        'zero_offset': zero_offset
+    }
+
+
+def calibrate_all(driver: RobstrideDriver, config: dict, config_path: str, joint_filter: str = None):
+    """Run calibration for all (or one) joint."""
 
     joints = config['joints']
 
-    print(f"{'Joint':<20} {'ID':>4} {'Raw (°)':>10} {'Sign':>5} {'Offset':>8} {'Final (°)':>10}")
-    print("-" * 65)
-
-    for name, cfg in joints.items():
-        motor_id = cfg['motor_id']
-        sign = cfg.get('sign', 1)
-        offset = cfg.get('zero_offset', 0.0)
-
-        state = driver.read(motor_id)
-        raw_deg = np.degrees(state.position)
-        final_deg = sign * raw_deg - offset
-
-        print(f"{name:<20} {motor_id:>4} {raw_deg:>+10.2f} {sign:>+5} {offset:>+8.2f} {final_deg:>+10.2f}")
-
-
-def verify(driver: RobstrideDriver, config: dict):
-    """
-    Verify config matches hardware. Does NOT move anything.
-    """
-    print("\n" + "=" * 40)
-    print("VERIFYING CONFIGURATION")
-    print("=" * 40)
-    print("(This does not move any motors)\n")
-
-    found = driver.scan()
-    joints = config['joints']
-    expected = {cfg['motor_id']: name for name, cfg in joints.items()}
-
-    all_ok = True
-
-    for motor_id, name in expected.items():
-        if motor_id in found:
-            state = driver.read(motor_id)
-            temp = state.temperature
-            pos = np.degrees(state.position)
-            print(f"  [OK] {name} (ID {motor_id}): {pos:+.1f}°, {temp:.1f}°C")
-        else:
-            print(f"  [MISSING] {name} (ID {motor_id})")
-            all_ok = False
-
-    unexpected = [m for m in found if m not in expected]
-    for motor_id in unexpected:
-        print(f"  [UNEXPECTED] Motor ID {motor_id} not in config")
-        all_ok = False
-
-    print(f"\n{'OK - All motors found' if all_ok else 'ISSUES FOUND'}")
-    return all_ok
-
-
-def set_zero(driver: RobstrideDriver, config: dict, config_path: str, joint_name: str = None):
-    """
-    Set current position as zero in motor memory.
-    Also saves the offset to config file.
-
-    WARNING: This modifies motor's internal zero point.
-    """
-    joints = config['joints']
-
-    if joint_name:
-        if joint_name not in joints:
-            print(f"Unknown joint: {joint_name}")
+    if joint_filter:
+        if joint_filter not in joints:
+            print(f"Unknown joint: {joint_filter}")
             print(f"Available: {list(joints.keys())}")
             return
-        to_zero = {joint_name: joints[joint_name]}
-    else:
-        to_zero = joints
+        joints = {joint_filter: joints[joint_filter]}
 
-    print("\n" + "=" * 40)
-    print("SET ZERO POSITION")
-    print("=" * 40)
+    print("\n" + "="*50)
+    print("CALIBRATION")
+    print("="*50)
+    print("\nFor each joint, you will:")
+    print("  1. Move to negative limit (min)")
+    print("  2. Move to positive limit (max)")
+    print("  3. Move to zero/home position")
+    print("\nThe script records positions - motors stay disabled.")
 
-    print("\nThis will:")
-    print("  1. Set CURRENT position as zero in motor memory")
-    print("  2. Update zero_offset in config file")
-    print("\nMotors to zero:")
-
-    for name, cfg in to_zero.items():
-        state = driver.read(cfg['motor_id'])
-        pos = np.degrees(state.position)
-        print(f"  {name} (ID {cfg['motor_id']}): currently at {pos:+.2f}°")
-
-    print("\nEnsure the arm is in the REFERENCE POSITION!")
-
-    if input("\nProceed? [y/N]: ").lower() != 'y':
+    if input("\nReady? [y/N]: ").lower() != 'y':
         print("Aborted.")
         return
 
-    # Record current positions before zeroing
-    pre_zero_positions = {}
-    for name, cfg in to_zero.items():
-        state = driver.read(cfg['motor_id'])
-        pre_zero_positions[name] = np.degrees(state.position)
-
-    # Set zero in motor memory
-    print("\nSetting zero...")
     results = {}
-    for name, cfg in to_zero.items():
-        motor_id = cfg['motor_id']
-        ok = driver.set_zero(motor_id)
-        results[name] = ok
-        status = "OK" if ok else "FAILED"
-        print(f"  {name}: {status}")
-
-    # Verify
-    print("\nVerifying...")
-    for name, cfg in to_zero.items():
-        state = driver.read(cfg['motor_id'])
-        pos = np.degrees(state.position)
-        print(f"  {name}: {pos:+.4f}° (should be ~0)")
-
-    # Update config with zero offsets
-    print("\nUpdating config file...")
-    for name in to_zero.keys():
-        if results[name]:
-            # The offset is the position we zeroed at
-            config['joints'][name]['zero_offset'] = 0.0  # Reset since motor is now zeroed
-
-    save_config(config, config_path)
-    print(f"Config saved to {config_path}")
-
-    # Save calibration record
-    calibration = load_calibration()
-    calibration['last_zero'] = {
-        'timestamp': datetime.now().isoformat(),
-        'joints': {name: pre_zero_positions[name] for name in to_zero.keys()}
-    }
-    save_calibration(calibration)
-
-
-def save_offsets(driver: RobstrideDriver, config: dict, config_path: str):
-    """
-    Save current positions as zero offsets WITHOUT modifying motor memory.
-
-    Use this to calibrate via software offset instead of hardware zero.
-    """
-    print("\n" + "=" * 40)
-    print("SAVE CURRENT POSITIONS AS OFFSETS")
-    print("=" * 40)
-
-    print("\nThis will save current positions as software offsets.")
-    print("Motor memory will NOT be modified.")
-    print("\nCurrent positions:")
-
-    joints = config['joints']
-    current_positions = {}
-
-    for name, cfg in joints.items():
-        state = driver.read(cfg['motor_id'])
-        pos = np.degrees(state.position)
-        current_positions[name] = pos
-        print(f"  {name}: {pos:+.2f}°")
-
-    print("\nEnsure the arm is in the REFERENCE POSITION!")
-
-    if input("\nSave these as zero offsets? [y/N]: ").lower() != 'y':
-        print("Aborted.")
-        return
-
-    # Update config
-    for name, pos in current_positions.items():
-        sign = config['joints'][name].get('sign', 1)
-        # Offset = current raw position (so that final = sign * raw - offset = 0)
-        config['joints'][name]['zero_offset'] = sign * pos
-
-    save_config(config, config_path)
-    print(f"\nOffsets saved to {config_path}")
-
-    # Verify
-    print("\nVerification (all should be ~0°):")
-    for name, cfg in joints.items():
-        state = driver.read(cfg['motor_id'])
-        raw = np.degrees(state.position)
-        sign = cfg.get('sign', 1)
-        offset = cfg.get('zero_offset', 0.0)
-        final = sign * raw - offset
-        print(f"  {name}: {final:+.4f}°")
-
-
-def test_direction(driver: RobstrideDriver, config: dict, config_path: str):
-    """
-    Interactive test to determine correct sign for each joint.
-
-    CAUTION: This WILL move motors!
-    """
-    print("\n" + "=" * 40)
-    print("DIRECTION TEST")
-    print("=" * 40)
-    print("\nThis test will move each motor slightly to determine")
-    print("the correct sign convention.")
-    print("\nCAUTION: Motors WILL move!")
-
-    if input("\nProceed? [y/N]: ").lower() != 'y':
-        print("Aborted.")
-        return
-
-    joints = config['joints']
-    kp = config['control']['default_kp']
-    kd = config['control']['default_kd']
 
     for name, cfg in joints.items():
         motor_id = cfg['motor_id']
-        current_sign = cfg.get('sign', 1)
+        result = calibrate_joint(driver, name, motor_id)
+        results[name] = result
 
-        print(f"\n--- Testing {name} (ID {motor_id}) ---")
+    # Show summary
+    print("\n" + "="*50)
+    print("SUMMARY")
+    print("="*50)
+    print(f"\n{'Joint':<20} {'Sign':>5} {'Min':>8} {'Max':>8} {'Offset':>8}")
+    print("-"*55)
 
-        # Enable motor
-        driver.enable(motor_id)
-        import time
-        time.sleep(0.3)
+    for name, r in results.items():
+        print(f"{name:<20} {r['sign']:>+5} {r['min']:>+8.1f} {r['max']:>+8.1f} {r['zero_offset']:>+8.2f}")
 
-        # Read current position
-        state = driver.read(motor_id)
-        start_pos = state.position
+    # Save to config
+    if input("\nSave to config? [y/N]: ").lower() != 'y':
+        print("Not saved.")
+        return
 
-        # Move +5 degrees (in motor space)
-        target = start_pos + np.radians(5)
-        print(f"Moving motor +5° (positive direction)...")
+    for name, r in results.items():
+        config['joints'][name]['min'] = r['min']
+        config['joints'][name]['max'] = r['max']
+        config['joints'][name]['sign'] = r['sign']
+        config['joints'][name]['zero_offset'] = r['zero_offset']
 
-        for _ in range(50):  # 0.5 seconds
-            driver.command(motor_id, target, kp=kp, kd=kd)
-            time.sleep(0.01)
-
-        # Ask user which way it moved
-        print("\nWhich way did the joint move?")
-        print("  1. Positive direction (e.g., shoulder forward, elbow bend)")
-        print("  2. Negative direction (opposite)")
-        print("  3. Didn't move / unsure")
-
-        choice = input("\nChoice [1/2/3]: ").strip()
-
-        # Return to start
-        print("Returning to start position...")
-        for _ in range(50):
-            driver.command(motor_id, start_pos, kp=kp, kd=kd)
-            time.sleep(0.01)
-
-        driver.disable(motor_id)
-
-        # Update sign
-        if choice == '1':
-            new_sign = 1
-        elif choice == '2':
-            new_sign = -1
-        else:
-            new_sign = current_sign
-            print(f"Keeping current sign: {current_sign}")
-            continue
-
-        if new_sign != current_sign:
-            config['joints'][name]['sign'] = new_sign
-            print(f"Sign updated: {current_sign} -> {new_sign}")
-        else:
-            print(f"Sign confirmed: {new_sign}")
-
-    # Save
-    if input("\nSave direction settings? [y/N]: ").lower() == 'y':
-        save_config(config, config_path)
-        print(f"Config saved to {config_path}")
+    save_config(config, config_path)
+    print(f"\nSaved to {config_path}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Motor calibration utility',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s --scan                 # Find motors (safe, no movement)
-  %(prog)s --read                 # Read positions (safe, no movement)
-  %(prog)s --verify               # Check config matches hardware
-  %(prog)s --set-zero             # Zero all motors at current position
-  %(prog)s --set-zero elbow       # Zero specific joint
-  %(prog)s --save-offsets         # Save current positions as software offsets
-  %(prog)s --test-direction       # Interactive direction test (MOVES MOTORS)
-        """
-    )
-
-    parser.add_argument('--config', default='config.yaml', help='Config file')
-    parser.add_argument('--scan', action='store_true', help='Scan for motors')
-    parser.add_argument('--read', action='store_true', help='Read current positions')
-    parser.add_argument('--verify', action='store_true', help='Verify config vs hardware')
-    parser.add_argument('--set-zero', nargs='?', const='ALL', metavar='JOINT',
-                        help='Set current position as zero (optionally specify joint)')
-    parser.add_argument('--save-offsets', action='store_true',
-                        help='Save current positions as software zero offsets')
-    parser.add_argument('--test-direction', action='store_true',
-                        help='Interactive direction test (CAUTION: moves motors)')
-
+    parser = argparse.ArgumentParser(description='Motor calibration')
+    parser.add_argument('--config', default='config.yaml')
+    parser.add_argument('--scan', action='store_true', help='Scan for motors only')
+    parser.add_argument('--read', action='store_true', help='Read positions only')
+    parser.add_argument('--joint', help='Calibrate specific joint only')
     args = parser.parse_args()
-
-    # Check for at least one action
-    if not any([args.scan, args.read, args.verify, args.set_zero,
-                args.save_offsets, args.test_direction]):
-        parser.print_help()
-        return
 
     config = load_config(args.config)
     driver = RobstrideDriver(config['can']['interface'])
 
     if not driver.initialize():
-        print("Driver initialization failed!")
-        print("\nCheck that CAN interface is up:")
-        print("  sudo ip link set can0 type can bitrate 1000000")
-        print("  sudo ip link set can0 up")
-        return
+        print("Driver init failed. Check CAN interface.")
+        return 1
 
     try:
-        # Safe operations (no motor movement)
         if args.scan:
             scan(driver)
-
-        if args.read:
-            read_positions(driver, config)
-
-        if args.verify:
-            verify(driver, config)
-
-        # Operations that modify config
-        if args.set_zero:
-            joint = None if args.set_zero == 'ALL' else args.set_zero
-            set_zero(driver, config, args.config, joint)
-
-        if args.save_offsets:
-            save_offsets(driver, config, args.config)
-
-        # Operations that move motors
-        if args.test_direction:
-            test_direction(driver, config, args.config)
-
+        elif args.read:
+            read_all(driver, config)
+        else:
+            calibrate_all(driver, config, args.config, args.joint)
     finally:
         driver.shutdown()
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    exit(main())
