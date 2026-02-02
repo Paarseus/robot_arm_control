@@ -20,13 +20,21 @@ from safety import Safety
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    """Load YAML configuration."""
     with open(path) as f:
         return yaml.safe_load(f)
 
 
 class ArmController:
-    """Main arm controller."""
+    """
+    Arm controller with proper sign and offset handling.
+
+    Coordinate frames:
+    - JOINT space: What the user sees (degrees, respects sign/offset)
+    - MOTOR space: Raw encoder values (radians, no sign/offset)
+
+    All external interfaces use JOINT space.
+    Driver uses MOTOR space.
+    """
 
     def __init__(self, config: dict, test_mode: bool = False):
         self.config = config
@@ -35,7 +43,16 @@ class ArmController:
         # Joint info
         self.joints = config['joints']
         self.joint_names = list(self.joints.keys())
-        self.motor_ids = {name: cfg['motor_id'] for name, cfg in self.joints.items()}
+
+        # Build lookup tables
+        self.motor_ids = {}
+        self.signs = {}
+        self.offsets = {}
+
+        for name, cfg in self.joints.items():
+            self.motor_ids[name] = cfg['motor_id']
+            self.signs[name] = cfg.get('sign', 1)
+            self.offsets[name] = np.radians(cfg.get('zero_offset', 0.0))
 
         # Control params
         self.rate = config['control']['rate_hz']
@@ -45,7 +62,7 @@ class ArmController:
 
         # Components
         if test_mode:
-            self.driver = MockDriver(config['can']['interface'])
+            self.driver = MockDriver()
         else:
             self.driver = RobstrideDriver(config['can']['interface'])
 
@@ -53,7 +70,22 @@ class ArmController:
 
         # State
         self._running = False
-        self._states: Dict[str, MotorState] = {}
+        self._states: Dict[str, float] = {}  # Joint positions in degrees
+
+    def _motor_to_joint(self, name: str, motor_rad: float) -> float:
+        """Convert motor radians to joint degrees."""
+        sign = self.signs[name]
+        offset = self.offsets[name]
+        return np.degrees(sign * motor_rad - offset)
+
+    def _joint_to_motor(self, name: str, joint_deg: float) -> float:
+        """Convert joint degrees to motor radians."""
+        sign = self.signs[name]
+        offset = self.offsets[name]
+        # joint_deg = degrees(sign * motor_rad - offset)
+        # radians(joint_deg) = sign * motor_rad - offset
+        # motor_rad = (radians(joint_deg) + offset) / sign
+        return (np.radians(joint_deg) + offset) / sign
 
     def initialize(self) -> bool:
         """Initialize driver and enable motors."""
@@ -68,41 +100,46 @@ class ArmController:
             print("[ERROR] Driver initialization failed")
             return False
 
-        # Scan and enable motors
+        # Verify motors
         found = self.driver.scan()
-        expected = list(self.motor_ids.values())
-        missing = [m for m in expected if m not in found]
-
-        if missing and not self.test_mode:
-            print(f"[WARNING] Missing motors: {missing}")
-
-        print("\nEnabling motors...")
         for name in self.joint_names:
             motor_id = self.motor_ids[name]
-            if self.driver.enable(motor_id):
-                print(f"  {name} (ID {motor_id}): OK")
-            else:
-                print(f"  {name} (ID {motor_id}): FAILED")
+            status = "OK" if motor_id in found else "MISSING"
+            sign = self.signs[name]
+            offset_deg = np.degrees(self.offsets[name])
+            print(f"  {name}: ID={motor_id} sign={sign:+d} offset={offset_deg:+.1f}° [{status}]")
 
-        print("\nInitialization complete.")
+        # Enable motors
+        print("\nEnabling motors...")
+        for name in self.joint_names:
+            self.driver.enable(self.motor_ids[name])
+
+        print("Ready.")
         return True
 
-    def read_state(self) -> Dict[str, MotorState]:
-        """Read all motor states."""
-        return {
-            name: self.driver.read(self.motor_ids[name])
-            for name in self.joint_names
-        }
+    def read_state(self) -> Dict[str, float]:
+        """Read joint positions in degrees (JOINT space)."""
+        positions = {}
+        for name in self.joint_names:
+            motor_state = self.driver.read(self.motor_ids[name])
+            positions[name] = self._motor_to_joint(name, motor_state.position)
+        return positions
 
     def send_command(self, positions_deg: Dict[str, float]):
-        """Send position commands to motors."""
-        # Apply safety limits (converts to radians)
-        positions_rad = self.safety.clamp_all(positions_deg)
+        """
+        Send position commands in degrees (JOINT space).
+        Applies safety limits, sign, and offset automatically.
+        """
+        # Safety clamp (returns radians, but we need to redo the conversion)
+        safe_rad = self.safety.clamp_all(positions_deg)
 
-        for name, pos_rad in positions_rad.items():
+        for name, joint_rad in safe_rad.items():
+            joint_deg = np.degrees(joint_rad)
+            motor_rad = self._joint_to_motor(name, joint_deg)
+
             self.driver.command(
                 motor_id=self.motor_ids[name],
-                position=pos_rad,
+                position=motor_rad,
                 kp=self.kp,
                 kd=self.kd
             )
@@ -110,16 +147,15 @@ class ArmController:
     def run(self, duration: float = None):
         """Run control loop."""
         print(f"\n{'='*50}")
-        print("Starting control loop (Ctrl+C to stop)")
+        print("Control loop running (Ctrl+C to stop)")
         print('='*50 + "\n")
 
         self._running = True
         start = time.time()
         loop_count = 0
 
-        # Graceful shutdown on Ctrl+C
         def on_sigint(sig, frame):
-            print("\n[INFO] Stopping...")
+            print("\n[Stopping...]")
             self._running = False
 
         signal.signal(signal.SIGINT, on_sigint)
@@ -129,12 +165,11 @@ class ArmController:
                 loop_start = time.time()
                 t = loop_start - start
 
-                # Check duration
                 if duration and t >= duration:
                     break
 
-                # === CONTROL LOGIC ===
-                # Replace this with your own behavior
+                # === YOUR CONTROL LOGIC ===
+                # Positions in JOINT space (degrees)
                 targets = {
                     'shoulder_pitch': 30 * np.sin(0.5 * t),
                     'shoulder_roll': 0,
@@ -142,24 +177,18 @@ class ArmController:
                     'wrist_pitch': 20 * np.sin(0.8 * t),
                     'wrist_roll': 0,
                 }
-                # =====================
+                # ==========================
 
-                # Read state
+                # Read and command
                 self._states = self.read_state()
-
-                # Check temps
-                for name, state in self._states.items():
-                    self.safety.check_temperature(name, state.temperature)
-
-                # Send commands
                 self.send_command(targets)
 
                 # Log every second
                 loop_count += 1
                 if loop_count % self.rate == 0:
-                    self._log_status(t, targets)
+                    self._log(t, targets)
 
-                # Maintain loop rate
+                # Rate control
                 elapsed = time.time() - loop_start
                 if elapsed < self.period:
                     time.sleep(self.period - elapsed)
@@ -167,30 +196,24 @@ class ArmController:
         finally:
             self.shutdown()
 
-    def _log_status(self, t: float, targets: Dict[str, float]):
-        """Print status line."""
-        state = self._states.get('shoulder_pitch', MotorState())
+    def _log(self, t: float, targets: Dict[str, float]):
         target = targets.get('shoulder_pitch', 0)
-        actual = np.degrees(state.position)
-
-        print(f"t={t:5.1f}s | target={target:+6.1f}° actual={actual:+6.1f}° | temp={state.temperature:.0f}°C")
+        actual = self._states.get('shoulder_pitch', 0)
+        print(f"t={t:5.1f}s | target={target:+6.1f}° actual={actual:+6.1f}°")
 
     def shutdown(self):
-        """Disable motors and cleanup."""
         print("\nShutting down...")
-
         for name in self.joint_names:
             self.driver.disable(self.motor_ids[name])
-
         self.driver.shutdown()
         print("Done.")
 
 
 def main():
     parser = argparse.ArgumentParser(description='K-Bot Arm Controller')
-    parser.add_argument('--config', default='config.yaml', help='Config file')
-    parser.add_argument('--test', action='store_true', help='Test mode (no hardware)')
-    parser.add_argument('--duration', type=float, help='Run duration in seconds')
+    parser.add_argument('--config', default='config.yaml')
+    parser.add_argument('--test', action='store_true', help='Test mode')
+    parser.add_argument('--duration', type=float, help='Run duration (seconds)')
     args = parser.parse_args()
 
     config = load_config(args.config)
