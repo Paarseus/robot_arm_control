@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Motor Calibration Script
+Motor Calibration Script (Read-Only)
 
-Two-phase calibration:
-  Phase 1: Set hardware zero for all motors at once
+Records motor positions without sending any commands to the hardware.
+The user manually positions each joint and the script reads the encoder values.
+
+Phases:
+  Phase 1: Record zero offset for all motors (arm at home pose)
   Phase 2: Record joint limits one at a time
 
 Usage:
@@ -37,59 +40,55 @@ def read_position(driver: RobstrideDriver, motor_id: int) -> float:
     return np.degrees(state.position)
 
 
-def set_zero_all(driver: RobstrideDriver, config: dict) -> bool:
+def record_zero_offsets(driver: RobstrideDriver, config: dict) -> dict:
     """
-    Phase 1: Set hardware zero for all motors.
+    Phase 1: Record zero offsets for all motors (read-only).
 
-    User positions the entire arm at the home/reference pose,
-    then we call set_zero() on each motor to save that as zero.
+    User positions the arm at the home/reference pose,
+    then we read each motor's current position and store it as the zero offset.
+    No commands are sent to the motors.
     """
     print("\n" + "=" * 50)
-    print("PHASE 1: SET ZERO POSITION")
+    print("PHASE 1: RECORD ZERO OFFSETS")
     print("=" * 50)
     print("\nPosition the arm at the HOME/REFERENCE pose.")
     print("All joints should be at their zero position.")
-    print("\nThis will set the hardware zero in each motor's memory.")
+    print("\nThis will ONLY READ positions, nothing is sent to the motors.")
 
     if input("\nArm at home position? [y/N]: ").lower() != 'y':
         print("Aborted.")
-        return False
+        return {}
 
-    print("\nSetting zero for all motors...")
-    success = True
+    print("\nReading zero offsets...")
+    offsets = {}
 
     for name, cfg in config['joints'].items():
         motor_id = cfg['motor_id']
-        if driver.set_zero(motor_id):
-            print(f"  {name:20} (ID {motor_id:2}): zero set")
-        else:
-            print(f"  {name:20} (ID {motor_id:2}): FAILED")
-            success = False
+        pos = read_position(driver, motor_id)
+        offsets[name] = round(pos, 2)
+        print(f"  {name:20} (ID {motor_id:2}): {pos:+.2f} deg")
 
-    if success:
-        print("\nAll motors zeroed successfully.")
-    else:
-        print("\nSome motors failed to zero. Check connections.")
-
-    return success
+    print("\nAll offsets recorded.")
+    return offsets
 
 
-def calibrate_limits(driver: RobstrideDriver, config: dict) -> dict:
+def record_limits(driver: RobstrideDriver, config: dict, offsets: dict) -> dict:
     """
-    Phase 2: Record joint limits for each motor.
+    Phase 2: Record joint limits for each motor (read-only).
 
     For each joint:
-      1. User moves to negative limit -> record position
-      2. User moves to positive limit -> record position
-      3. Sign is determined from the recorded positions
+      1. User moves to negative limit -> read position
+      2. User moves to positive limit -> read position
+      3. Positions are stored relative to the zero offset from Phase 1
 
-    Returns dict of {joint_name: {min, max, sign}} for all joints.
+    No commands are sent to the motors.
+    Returns dict of {joint_name: {min, max, sign, zero_offset}} for all joints.
     """
     print("\n" + "=" * 50)
     print("PHASE 2: RECORD JOINT LIMITS")
     print("=" * 50)
     print("\nFor each joint, move to the limits when prompted.")
-    print("The motor should already be at zero from Phase 1.")
+    print("This will ONLY READ positions, nothing is sent to the motors.")
 
     if input("\nReady to record limits? [y/N]: ").lower() != 'y':
         print("Aborted.")
@@ -99,20 +98,23 @@ def calibrate_limits(driver: RobstrideDriver, config: dict) -> dict:
 
     for name, cfg in config['joints'].items():
         motor_id = cfg['motor_id']
+        zero = offsets.get(name, 0.0)
 
-        print(f"\n--- {name} (Motor ID {motor_id}) ---")
+        print(f"\n--- {name} (Motor ID {motor_id}, zero offset: {zero:+.2f}) ---")
 
         # Record negative limit
         print("\n  Move to NEGATIVE limit, then press Enter...")
         input()
-        neg_pos = read_position(driver, motor_id)
-        print(f"  Recorded: {neg_pos:+.2f} deg")
+        neg_raw = read_position(driver, motor_id)
+        neg_pos = neg_raw - zero
+        print(f"  Raw: {neg_raw:+.2f} deg, Relative: {neg_pos:+.2f} deg")
 
         # Record positive limit
         print("\n  Move to POSITIVE limit, then press Enter...")
         input()
-        pos_pos = read_position(driver, motor_id)
-        print(f"  Recorded: {pos_pos:+.2f} deg")
+        pos_raw = read_position(driver, motor_id)
+        pos_pos = pos_raw - zero
+        print(f"  Raw: {pos_raw:+.2f} deg, Relative: {pos_pos:+.2f} deg")
 
         # Determine sign: positive limit should be > negative limit
         if pos_pos > neg_pos:
@@ -129,14 +131,15 @@ def calibrate_limits(driver: RobstrideDriver, config: dict) -> dict:
         results[name] = {
             'min': min_val,
             'max': max_val,
-            'sign': sign
+            'sign': sign,
+            'zero_offset': zero
         }
 
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Motor calibration')
+    parser = argparse.ArgumentParser(description='Motor calibration (read-only)')
     parser.add_argument('--config', default='config.yaml', help='Config file path')
     args = parser.parse_args()
 
@@ -148,12 +151,13 @@ def main():
         return 1
 
     try:
-        # Phase 1: Set zero
-        if not set_zero_all(driver, config):
+        # Phase 1: Record zero offsets (read-only)
+        offsets = record_zero_offsets(driver, config)
+        if not offsets:
             return 1
 
-        # Phase 2: Record limits
-        results = calibrate_limits(driver, config)
+        # Phase 2: Record limits (read-only)
+        results = record_limits(driver, config, offsets)
         if not results:
             return 1
 
@@ -161,10 +165,10 @@ def main():
         print("\n" + "=" * 50)
         print("CALIBRATION SUMMARY")
         print("=" * 50)
-        print(f"\n{'Joint':<20} {'Sign':>5} {'Min':>8} {'Max':>8}")
-        print("-" * 45)
+        print(f"\n{'Joint':<20} {'Sign':>5} {'Min':>8} {'Max':>8} {'Zero':>8}")
+        print("-" * 53)
         for name, r in results.items():
-            print(f"{name:<20} {r['sign']:>+5} {r['min']:>+8.1f} {r['max']:>+8.1f}")
+            print(f"{name:<20} {r['sign']:>+5} {r['min']:>+8.1f} {r['max']:>+8.1f} {r['zero_offset']:>+8.2f}")
 
         # Save to config
         if input("\nSave to config? [y/N]: ").lower() != 'y':
@@ -175,7 +179,7 @@ def main():
             config['joints'][name]['min'] = r['min']
             config['joints'][name]['max'] = r['max']
             config['joints'][name]['sign'] = r['sign']
-            config['joints'][name]['zero_offset'] = 0.0  # Hardware zero used
+            config['joints'][name]['zero_offset'] = r['zero_offset']
 
         save_config(config, args.config)
         print(f"\nSaved to {args.config}")
