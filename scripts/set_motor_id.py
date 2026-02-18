@@ -2,8 +2,11 @@
 """
 Motor ID Configuration
 
-Scans the CAN bus for connected RobStride motors and allows
-setting new motor IDs using the robstride-dynamics library.
+Scans the CAN bus for connected Robstride motors and allows
+setting new motor IDs via the CAN protocol.
+
+Uses robstride_dynamics for scanning and raw CAN frames for ID
+assignment (works around a bug in robstride_dynamics.write_id).
 
 Usage:
     python scripts/set_motor_id.py                  # Scan and configure
@@ -13,61 +16,76 @@ Usage:
 import argparse
 import sys
 
-from robstride_dynamics import RobstrideBus, Motor, CommunicationType
+import can
+from robstride_dynamics import RobstrideBus
 
-
+# Robstride CAN protocol constants
+MSG_SET_ID = 7
+MSG_SAVE_PARAMS = 9
+HOST_CAN_ID = 0xFD
 SAVE_MAGIC = bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
 
 
-def scan(channel: str) -> dict[int, list[int]]:
-    """Scan the bus and return dict of discovered motor IDs."""
-    return RobstrideBus.scan_channel(channel)
+def scan(channel: str) -> list[int]:
+    """Scan the bus and return sorted list of discovered motor IDs."""
+    found = RobstrideBus.scan_channel(channel)
+    return sorted(found.keys())
 
 
-def print_motors(found: dict[int, list[int]]):
+def set_id(channel: str, current_id: int, new_id: int) -> bool:
+    """Change a motor's CAN ID and save to flash.
+
+    Uses raw CAN frames following the Robstride protocol:
+      SetID frame: arb_id = (7 << 24) | (host_id | new_id << 8) << 8 | current_id
+      Save frame:  arb_id = (9 << 24) | (host_id << 8) | new_id
+
+    Returns True if the motor responded to both commands.
+    """
+    bus = can.Bus(channel=channel, interface="socketcan")
+    try:
+        # Set the new ID
+        id_data = HOST_CAN_ID | (new_id << 8)
+        arb_id = (MSG_SET_ID << 24) | (id_data << 8) | current_id
+        bus.send(can.Message(arbitration_id=arb_id, data=b"\x00" * 8, is_extended_id=True))
+        resp = bus.recv(timeout=1.0)
+        if not resp:
+            print(f"  No response to SetID command (motor {current_id} may be offline).")
+            return False
+
+        # Save to non-volatile flash
+        save_arb = (MSG_SAVE_PARAMS << 24) | (HOST_CAN_ID << 8) | new_id
+        bus.send(can.Message(arbitration_id=save_arb, data=SAVE_MAGIC, is_extended_id=True))
+        save_resp = bus.recv(timeout=1.0)
+        if not save_resp:
+            print("  Warning: no response to save command. Motor may need a power cycle.")
+            return False
+
+        return True
+    finally:
+        bus.shutdown()
+
+
+def print_motors(motor_ids: list[int]):
     """Print discovered motors."""
-    if not found:
+    if not motor_ids:
         print("No motors found.")
         return
-    print(f"\nFound {len(found)} motor(s):")
-    for motor_id in sorted(found.keys()):
+    print(f"\nFound {len(motor_ids)} motor(s):")
+    for motor_id in motor_ids:
         print(f"  ID {motor_id}")
 
 
-def set_id(channel: str, current_id: int, new_id: int):
-    """Change a motor's CAN ID and save to flash."""
-    motors = {"target": Motor(id=current_id, model="rs-00")}
-    bus = RobstrideBus(channel, motors)
-    bus.connect(handshake=False)
-
-    try:
-        bus.disable("target")
-        bus.write_id("target", new_id)
-
-        # Save to non-volatile memory
-        bus.transmit(
-            CommunicationType.SAVE_PARAMETERS,
-            bus.host_id,
-            new_id,
-            SAVE_MAGIC
-        )
-    finally:
-        bus.disconnect()
-
-
 def main():
-    parser = argparse.ArgumentParser(description='RobStride motor ID configuration')
-    parser.add_argument('--interface', default='can0', help='CAN interface (default: can0)')
+    parser = argparse.ArgumentParser(description="Robstride motor ID configuration")
+    parser.add_argument("--interface", default="can0", help="CAN interface (default: can0)")
     args = parser.parse_args()
 
     print(f"Scanning {args.interface}...")
-    found = scan(args.interface)
-    print_motors(found)
+    motor_ids = scan(args.interface)
+    print_motors(motor_ids)
 
-    if not found:
+    if not motor_ids:
         return 1
-
-    motor_ids = sorted(found.keys())
 
     print("\nTo set a new ID, enter: <current_id> <new_id>")
     print("Enter 'scan' to rescan, 'quit' to exit.\n")
@@ -79,13 +97,13 @@ def main():
             print()
             break
 
-        if not cmd or cmd == 'quit':
+        if not cmd or cmd == "quit":
             break
 
-        if cmd == 'scan':
-            found = scan(args.interface)
-            print_motors(found)
-            motor_ids = sorted(found.keys())
+        if cmd == "scan":
+            print(f"Scanning {args.interface}...")
+            motor_ids = scan(args.interface)
+            print_motors(motor_ids)
             continue
 
         parts = cmd.split()
@@ -112,19 +130,17 @@ def main():
             print(f"  ID {new_id} is already in use.")
             continue
 
-        try:
-            set_id(args.interface, current_id, new_id)
-            print(f"  Set: {current_id} -> {new_id}")
+        if set_id(args.interface, current_id, new_id):
+            print(f"  Changed: {current_id} -> {new_id}")
 
             # Verify
-            found = scan(args.interface)
-            motor_ids = sorted(found.keys())
+            motor_ids = scan(args.interface)
             if new_id in motor_ids:
-                print(f"  Verified: motor now at ID {new_id}")
+                print(f"  Verified: motor responding at ID {new_id}")
             else:
                 print("  Warning: could not verify. Motor may need a power cycle.")
-        except Exception as e:
-            print(f"  Failed: {e}")
+        else:
+            print(f"  Failed to change ID {current_id} -> {new_id}")
 
     return 0
 

@@ -39,11 +39,11 @@ scripts/test_motors.py   Per-joint motion verification
 
 | Joint | ID | Range (deg) | Torque (Nm) |
 |-------|----|-------------|-------------|
-| shoulder_pitch | 11 | -90 to +180 | 40 |
-| shoulder_roll  | 12 | -90 to +90  | 40 |
-| elbow          | 13 |   0 to +135 | 20 |
-| wrist_pitch    | 14 | -90 to +90  |  6 |
-| wrist_roll     | 15 | -180 to +180|  6 |
+| shoulder_pitch | 21 | -0.6 to +259.4 | 40 |
+| shoulder_roll  | 22 | +0.1 to +116.9 | 40 |
+| elbow          | 23 |  0.0 to +191.9 | 20 |
+| wrist_pitch    | 24 | +0.1 to +143.4 |  6 |
+| wrist_roll     | 25 |  0.0 to 0.0    |  6 |
 
 K-Scale ID convention: tens digit = limb, ones digit = joint. New motors ship at ID 127.
 
@@ -59,7 +59,7 @@ sudo ip link set can0 up
 Connect ONE motor at a time (all ship as ID 127 - multiple will conflict).
 ```bash
 python scripts/set_motor_id.py
-# scan → find 127 → "127 11" → verified → disconnect → next motor
+# scan → find 127 → "127 21" → verified → disconnect → next motor
 ```
 After all 5 have unique IDs, daisy-chain them.
 
@@ -90,15 +90,17 @@ python main.py --duration 30  # time-limited
 
 | Library | Used by | Purpose |
 |---------|---------|---------|
-| `robstride` | `driver.py` | Motor communication: `RobstrideBus`, `read_frame()`, `write_operation_frame()` |
-| `robstride_dynamics` | `set_motor_id.py` | ID assignment: `scan_channel()`, `write_id()`, `SAVE_PARAMETERS` |
+| `robstride` | `driver.py` | Motor communication: `Client`, `read_param()`, `enable()`, `disable()` |
+| `robstride_dynamics` | `driver.py`, `set_motor_id.py` | Bus scanning: `RobstrideBus.scan_channel()` |
+| `python-can` | `driver.py`, `set_motor_id.py` | CAN bus: `can.Bus`, raw MIT mode frames |
 | `numpy` | all | Radians/degrees, clipping |
 | `pyyaml` | all | Config parsing |
 
 ## Control
 
-MIT mode impedance control via `write_operation_frame()`:
+MIT mode impedance control via raw CAN frames (Communication Type 1):
 - `p_des` (rad), `v_des` (rad/s), `kp` (default 20.0), `kd` (default 2.0), `t_ff` (Nm)
+- Position reads use `robstride.Client.read_param(motor_id, "mechpos")` — read-only, no movement
 
 ## Safety
 

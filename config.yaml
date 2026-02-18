@@ -12,56 +12,56 @@ control:
   default_kp: 20.0
   default_kd: 2.0
 
-# Joint configuration
+# Joint configuration (calibrated 2026-02-18)
 # - motor_id: CAN ID of the Robstride actuator
-# - min/max: Joint limits in degrees
+# - min/max: Joint limits in degrees (from calibration Phase 2)
 # - max_torque: Maximum torque in N·m
-# - sign: Direction multiplier (1 or -1)
+# - sign: Direction multiplier (1 or -1), auto-set during calibration
 #         1 = positive motor rotation = positive joint angle
 #        -1 = positive motor rotation = negative joint angle
 # - zero_offset: Mechanical offset from motor zero (degrees)
-#                Set during calibration, applied to all readings/commands
+#                Recorded during calibration Phase 1 (home pose)
 
 joints:
   shoulder_pitch:
-    motor_id: 11
-    min: -90
-    max: 180
+    motor_id: 21
+    min: -0.6
+    max: 259.4
     max_torque: 40
-    sign: 1
-    zero_offset: 0.0
+    sign: -1
+    zero_offset: 31.25
 
   shoulder_roll:
-    motor_id: 12
-    min: -90
-    max: 90
+    motor_id: 22
+    min: 0.1
+    max: 116.9
     max_torque: 40
-    sign: 1
-    zero_offset: 0.0
+    sign: -1
+    zero_offset: 227.45
 
   elbow:
-    motor_id: 13
-    min: 0
-    max: 135
+    motor_id: 23
+    min: 0.0
+    max: 191.9
     max_torque: 20
-    sign: 1
-    zero_offset: 0.0
+    sign: -1
+    zero_offset: -170.44
 
   wrist_pitch:
-    motor_id: 14
-    min: -90
-    max: 90
+    motor_id: 24
+    min: 0.1
+    max: 143.4
     max_torque: 6
     sign: 1
-    zero_offset: 0.0
+    zero_offset: 280.30
 
   wrist_roll:
-    motor_id: 15
-    min: -180
-    max: 180
+    motor_id: 25
+    min: 0.0
+    max: 0.0
     max_torque: 6
     sign: 1
-    zero_offset: 0.0
+    zero_offset: 110.99
 
 safety:
   watchdog_timeout_ms: 50
