@@ -29,15 +29,30 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _to_native(obj):
+    """Recursively convert numpy types to Python-native types for YAML serialization."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native(v) for v in obj]
+    return obj
+
+
 def save_config(config: dict, path: str):
     with open(path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(_to_native(config), f, default_flow_style=False, sort_keys=False)
 
 
 def read_position(driver: RobstrideDriver, motor_id: int) -> float:
     """Read motor position in degrees."""
     state = driver.read(motor_id)
-    return np.degrees(state.position)
+    return float(np.degrees(state.position))
 
 
 def record_zero_offsets(driver: RobstrideDriver, config: dict) -> dict:
@@ -116,15 +131,14 @@ def record_limits(driver: RobstrideDriver, config: dict, offsets: dict) -> dict:
         pos_pos = pos_raw - zero
         print(f"  Raw: {pos_raw:+.2f} deg, Relative: {pos_pos:+.2f} deg")
 
-        # Determine sign: positive limit should be > negative limit
-        if pos_pos > neg_pos:
-            sign = 1
-            min_val = round(neg_pos, 1)
-            max_val = round(pos_pos, 1)
-        else:
-            sign = -1
-            min_val = round(pos_pos, 1)
-            max_val = round(neg_pos, 1)
+        # Determine sign: positive raw should be > negative raw
+        sign = 1 if (pos_raw - neg_raw) > 0 else -1
+
+        # Compute limits in JOINT space: joint_deg = sign * motor_deg - zero
+        joint_at_neg = sign * neg_raw - zero
+        joint_at_pos = sign * pos_raw - zero
+        min_val = round(min(joint_at_neg, joint_at_pos), 1)
+        max_val = round(max(joint_at_neg, joint_at_pos), 1)
 
         print(f"  Result: sign={sign:+d}, min={min_val:+.1f}, max={max_val:+.1f}")
 
