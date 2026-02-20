@@ -9,8 +9,12 @@ JOINT space (degrees)     MOTOR space (radians)
         │                         ▲
         ▼                         │
     main.py ──── sign/offset ──── driver.py ──── CAN bus (can0, 1 Mbps)
+        │                               │
+    safety.py (clamps all commands)      │ (MIT mode feedback: pos+vel+torque+temp)
+        │                               ▼
+    collision.py (torque monitoring, kp scaling)
         │
-    safety.py (clamps all commands)
+    kinematics.py (FK: joint angles → end-effector pose)
 ```
 
 Two coordinate frames, never mix them:
@@ -19,20 +23,23 @@ Two coordinate frames, never mix them:
 
 Conversions (`main.py:ArmController`):
 ```
-motor→joint:  joint_deg = degrees(sign * motor_rad - offset)
-joint→motor:  motor_rad = (radians(joint_deg) + offset) / sign
+motor→joint:  joint_deg = degrees(sign * (motor_rad - offset))
+joint→motor:  motor_rad = radians(joint_deg) / sign + offset
 ```
 
 ## Files
 
 ```
-config.yaml              Robot config: motor IDs, joint limits, gains, safety
+config.yaml              Robot config: motor IDs, joint limits, gains, safety, collision
 driver.py                RobstrideDriver (hardware) + MockDriver (test)
 safety.py                Position/torque clamping, temperature monitoring
+collision.py             Collision detection: torque threshold + position error, kp recovery ramp
+kinematics.py            FK: joint angles → end-effector pose (kbot URDF chain)
 main.py                  ArmController, 100Hz control loop, CLI
 scripts/set_motor_id.py  Assign CAN IDs to motors (interactive)
-scripts/calibrate.py     Read-only calibration: zero offsets + joint limits
-scripts/test_motors.py   Per-joint motion verification
+scripts/calibrate.py        Read-only calibration: zero offsets + joint limits
+scripts/auto_calibrate.py   Auto-discover joint limits via collision detection
+scripts/test_motors.py      Per-joint motion verification
 ```
 
 ## Motors
@@ -72,6 +79,18 @@ python scripts/calibrate.py
 - Phase 2: Per-joint, move to negative/positive limits, records min/max, auto-determines sign
 - Saves results to `config.yaml`
 
+### 3b. Auto-calibrate limits (alternative to Phase 2)
+```bash
+python scripts/auto_calibrate.py                       # All joints, hardware
+python scripts/auto_calibrate.py --joint elbow          # Single joint
+python scripts/auto_calibrate.py --test -y              # Mock mode
+python scripts/auto_calibrate.py --speed 5 --margin 10  # Custom speed/margin
+```
+- Drives each joint in both directions until collision detection triggers
+- Records collision positions, applies safety margin, saves min/max to `config.yaml`
+- Requires Phase 1 (zero offsets + sign) already complete
+- `--torque-scale` (default 2x) controls collision sensitivity during active motion
+
 ### 4. Verify
 ```bash
 python scripts/test_motors.py                # all joints
@@ -96,11 +115,62 @@ python main.py --duration 30  # time-limited
 | `numpy` | all | Radians/degrees, clipping |
 | `pyyaml` | all | Config parsing |
 
+## Kinematics
+
+Forward kinematics using transform chain from kbot URDF (`kscalelabs/kbot-models`).
+Pure numpy, no extra dependencies. URDF-style transforms (translation + RPY + axis rotation per joint).
+
+```python
+from kinematics import forward_kinematics, get_position, get_all_frames
+
+T = forward_kinematics(joint_angles_deg)  # 4x4 homogeneous transform
+pos = get_position(joint_angles_deg)      # [x, y, z] meters
+frames = get_all_frames(joint_angles_deg) # base + 5 joint frames
+
+# Verify: python kinematics.py
+```
+
+Joint chain maps to kbot URDF right arm:
+| Our name | URDF joint | URDF axis |
+|----------|-----------|-----------|
+| shoulder_pitch | dof_right_shoulder_pitch_03 | Z(-1) |
+| shoulder_roll | dof_right_shoulder_roll_03 | Z(+1) |
+| elbow | dof_right_shoulder_yaw_02 | Z(+1) |
+| wrist_pitch | dof_right_elbow_02 | Z(+1) |
+| wrist_roll | dof_right_wrist_00 | Z(-1) |
+
+`ArmController.get_end_effector()` returns [x,y,z] from last `read_state()`.
+Control loop logs end-effector position every second.
+
 ## Control
 
 MIT mode impedance control via raw CAN frames (Communication Type 1):
 - `p_des` (rad), `v_des` (rad/s), `kp` (default 20.0), `kd` (default 2.0), `t_ff` (Nm)
+- `command()` returns `MotorState` with position, velocity, torque, temperature from feedback
+- `MotorState.valid` is `False` when feedback was fabricated (CAN timeout) — torque unreliable
 - Position reads use `robstride.Client.read_param(motor_id, "mechpos")` — read-only, no movement
+
+## Collision Detection
+
+`collision.py` monitors torque feedback to detect collisions and react compliantly.
+
+- **Primary detection**: `|torque| > protective_torque` sustained for `protection_time` (30ms default)
+- **Backup detection**: `|position_error| > threshold` (15° default) — triggers immediately
+- **Reaction**: kp drops to 0 (compliant/damped mode, kd maintained)
+- **Recovery**: linear kp ramp from 0→1 over `recovery_time` (1s default)
+
+Config in `config.yaml` under `collision:` section. Per-joint `protective_torque` thresholds.
+
+Control loop order: `read_state → collision.update → send_command(kp*kp_scale) → log`
+
+```bash
+# Test collision detection (mock mode only):
+python main.py --test --collision-test --duration 10
+# Injects 15Nm disturbance on shoulder_pitch at t=3s, clears at t=6s
+
+# Verify collision.py self-tests:
+python collision.py
+```
 
 ## Safety
 
@@ -109,6 +179,7 @@ Never bypass `safety.py`. All commands route through it.
 - Torque: clamped per joint
 - Temperature: 70C limit
 - Watchdog: 50ms timeout
+- Collision: torque monitoring + compliant reaction (see above)
 - `calibrate.py` is read-only by design
 
 ## Code Style

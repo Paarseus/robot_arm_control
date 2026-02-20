@@ -134,9 +134,9 @@ def record_limits(driver: RobstrideDriver, config: dict, offsets: dict) -> dict:
         # Determine sign: positive raw should be > negative raw
         sign = 1 if (pos_raw - neg_raw) > 0 else -1
 
-        # Compute limits in JOINT space: joint_deg = sign * motor_deg - zero
-        joint_at_neg = sign * neg_raw - zero
-        joint_at_pos = sign * pos_raw - zero
+        # Compute limits in JOINT space: joint_deg = sign * (motor_deg - zero)
+        joint_at_neg = sign * (neg_raw - zero)
+        joint_at_pos = sign * (pos_raw - zero)
         min_val = round(min(joint_at_neg, joint_at_pos), 1)
         max_val = round(max(joint_at_neg, joint_at_pos), 1)
 
